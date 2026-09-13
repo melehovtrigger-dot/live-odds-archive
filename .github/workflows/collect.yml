@@ -1,0 +1,70 @@
+name: collect
+
+# Continuous live-odds collection. This repo is PUBLIC, which is the whole point:
+# GitHub gives public repositories unlimited Actions minutes, and a single job may
+# run for up to 6 hours. Four 5.5-hour windows therefore cover ~22 hours of every
+# day at 30-second resolution for free — something no free private-repo quota or
+# sleeping free-tier host can do.
+#
+# Scheduled workflows are disabled after 60 days without repository activity; the
+# commit at the end of every run counts as activity, so that stays satisfied.
+on:
+  schedule:
+    - cron: "0 0 * * *"  # 03:00 MSK
+    - cron: "0 6 * * *"  # 09:00 MSK
+    - cron: "0 12 * * *" # 15:00 MSK
+    - cron: "0 18 * * *" # 21:00 MSK
+  workflow_dispatch:
+    inputs:
+      duration_min:
+        description: "Collection window in minutes (max 340)"
+        required: false
+        default: "330"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Collect
+        env:
+          DURATION_MIN: ${{ github.event.inputs.duration_min || '330' }}
+          OUT_DIR: data
+          INTERVAL_SEC: "30"
+          HEARTBEAT_MIN: "10"
+        run: node collect.mjs
+
+      - name: Commit
+        if: always()
+        run: |
+          set -e
+          git config user.name "live-odds-bot"
+          git config user.email "live-odds-bot@users.noreply.github.com"
+          # finished days are compressed so a month stays in single-digit MB
+          today=$(date -u +%F)
+          for f in data/*.jsonl; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .jsonl)
+            if [ "$base" != "$today" ] && [ ! -f "$f.gz" ]; then gzip -9 "$f"; echo "gz $f"; fi
+          done
+          git add -A data
+          if git diff --staged --quiet; then
+            echo "nothing new"
+          else
+            git commit -m "data $(date -u +%F\ %H:%M)"
+            git push
+            echo "pushed"
+          fi
